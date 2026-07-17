@@ -39,3 +39,5 @@ Thumbs.db
 # Test images
 test_images/
 *.tmp
+test_compress.py
+test_compressed_*.jpg

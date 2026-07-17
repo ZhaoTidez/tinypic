@@ -14,7 +14,7 @@ from PyQt5.QtWidgets import (
 )
 from PyQt5.QtCore import Qt, QThread, pyqtSignal, QMimeData, QSize
 from PyQt5.QtGui import QPixmap, QIcon, QImage, QDragEnterEvent, QDropEvent
-from PIL import Image, ImageQt
+from PIL import Image
 from pathlib import Path
 from typing import List, Optional
 import threading
@@ -92,15 +92,31 @@ class PreviewDialog(QDialog):
             # 原图
             orig_img = Image.open(self.original_path)
             orig_img.thumbnail((450, 450), Image.Resampling.LANCZOS)
-            orig_qimg = ImageQt.ImageQt(orig_img)
-            orig_pixmap = QPixmap.fromImage(orig_qimg)
+
+            # 确保图片是RGB模式
+            if orig_img.mode != 'RGB':
+                orig_img = orig_img.convert('RGB')
+
+            # 转换为QImage
+            data = orig_img.tobytes('raw', 'RGB')
+            qimg = QImage(data, orig_img.size[0], orig_img.size[1],
+                         orig_img.size[0] * 3, QImage.Format_RGB888)
+            orig_pixmap = QPixmap.fromImage(qimg)
             self.original_label.setPixmap(orig_pixmap)
 
             # 压缩后
             comp_img = Image.open(self.compressed_path)
             comp_img.thumbnail((450, 450), Image.Resampling.LANCZOS)
-            comp_qimg = ImageQt.ImageQt(comp_img)
-            comp_pixmap = QPixmap.fromImage(comp_qimg)
+
+            # 确保图片是RGB模式
+            if comp_img.mode != 'RGB':
+                comp_img = comp_img.convert('RGB')
+
+            # 转换为QImage
+            data = comp_img.tobytes('raw', 'RGB')
+            qimg = QImage(data, comp_img.size[0], comp_img.size[1],
+                         comp_img.size[0] * 3, QImage.Format_RGB888)
+            comp_pixmap = QPixmap.fromImage(qimg)
             self.compressed_label.setPixmap(comp_pixmap)
         except Exception as e:
             QMessageBox.critical(self, '错误', f'加载图片失败: {str(e)}')

@@ -82,7 +82,7 @@ class ImageProcessor:
             return False
 
     def compress_to_size(self, target_size_kb: int, output_format: str = 'JPEG',
-                         min_quality: int = 1, max_quality: int = 95) -> Tuple[bytes, int]:
+                         min_quality: int = 1, max_quality: int = 100) -> Tuple[bytes, int]:
         """
         压缩图片到目标大小
         使用二分法逼近目标文件大小
@@ -103,17 +103,69 @@ class ImageProcessor:
         }
         pil_format = format_map.get(output_format, 'JPEG')
 
-        # PNG格式不支持质量参数，直接保存
+        # PNG格式不支持质量参数，尝试调整尺寸
         if pil_format == 'PNG':
+            # 先尝试原尺寸
             buffer = io.BytesIO()
             self.image.save(buffer, format=pil_format, optimize=True)
-            return buffer.getvalue(), 100
+            data = buffer.getvalue()
 
-        # 二分法查找合适的质量
+            if len(data) <= target_bytes:
+                return data, 100
+
+            # 如果太大，缩小尺寸
+            scale_factor = 0.9
+            while len(data) > target_bytes and scale_factor >= 0.1:
+                new_width = int(self.image.size[0] * scale_factor)
+                new_height = int(self.image.size[1] * scale_factor)
+                temp_img = self.image.resize((new_width, new_height), Image.Resampling.LANCZOS)
+
+                buffer = io.BytesIO()
+                temp_img.save(buffer, format=pil_format, optimize=True)
+                data = buffer.getvalue()
+                scale_factor -= 0.1
+
+            return data, 100
+
+        # JPEG/WebP 使用二分法查找合适的质量
         low, high = min_quality, max_quality
         best_quality = min_quality
         best_data = b''
+        best_size = float('inf')
 
+        # 先检查最高质量是否超过目标
+        buffer = io.BytesIO()
+        try:
+            if pil_format == 'JPEG':
+                self.image.save(buffer, format=pil_format, quality=100, optimize=True)
+            else:
+                self.image.save(buffer, format=pil_format, quality=100)
+            max_quality_data = buffer.getvalue()
+
+            # 如果最高质量仍然小于目标，直接返回
+            if len(max_quality_data) <= target_bytes:
+                print(f"最高质量(100)的大小为{len(max_quality_data)//1024}KB，小于目标{target_size_kb}KB")
+                return max_quality_data, 100
+        except Exception as e:
+            print(f"最高质量压缩失败: {e}")
+
+        # 检查最低质量是否满足要求
+        buffer = io.BytesIO()
+        try:
+            if pil_format == 'JPEG':
+                self.image.save(buffer, format=pil_format, quality=min_quality, optimize=True)
+            else:
+                self.image.save(buffer, format=pil_format, quality=min_quality)
+            data = buffer.getvalue()
+
+            # 如果最低质量也太大，需要调整尺寸
+            if len(data) > target_bytes:
+                print(f"警告: 即使质量={min_quality}，文件大小{len(data)//1024}KB仍超过目标{target_size_kb}KB，将自动调整尺寸")
+                return self._compress_with_resize(target_bytes, pil_format, min_quality)
+        except Exception as e:
+            print(f"最低质量压缩失败: {e}")
+
+        # 二分法查找合适的质量
         while low <= high:
             mid = (low + high) // 2
             buffer = io.BytesIO()
@@ -121,39 +173,84 @@ class ImageProcessor:
             try:
                 if pil_format == 'JPEG':
                     self.image.save(buffer, format=pil_format, quality=mid, optimize=True)
-                elif pil_format == 'WEBP':
-                    self.image.save(buffer, format=pil_format, quality=mid)
                 else:
-                    self.image.save(buffer, format=pil_format)
+                    self.image.save(buffer, format=pil_format, quality=mid)
 
                 data = buffer.getvalue()
                 current_size = len(data)
 
-                # 如果大小接近目标，返回
-                if abs(current_size - target_bytes) < target_bytes * 0.05:  # 5%误差
+                print(f"质量={mid}, 大小={current_size//1024}KB, 目标={target_size_kb}KB")
+
+                # 如果大小接近目标（±10%），返回
+                if abs(current_size - target_bytes) < target_bytes * 0.1:
+                    print(f"找到合适质量: {mid}, 大小接近目标")
                     return data, mid
 
                 if current_size <= target_bytes:
-                    best_quality = mid
-                    best_data = data
+                    # 如果当前大小更接近目标，更新最佳结果
+                    if current_size > best_size or best_size == float('inf'):
+                        best_quality = mid
+                        best_data = data
+                        best_size = current_size
                     low = mid + 1
                 else:
+                    # 当前大小超过目标，降低质量
                     high = mid - 1
             except Exception as e:
                 print(f"压缩失败 (quality={mid}): {e}")
                 high = mid - 1
 
-        # 如果没找到合适的，使用最佳质量
-        if best_data:
+        # 如果找到了合适的数据，返回
+        if best_data and best_size <= target_bytes * 1.1:  # 允许10%误差
             return best_data, best_quality
 
-        # 最后尝试最低质量
+        # 如果没有找到合适的，返回最低质量
         buffer = io.BytesIO()
         try:
-            self.image.save(buffer, format=pil_format, quality=min_quality)
+            if pil_format == 'JPEG':
+                self.image.save(buffer, format=pil_format, quality=min_quality, optimize=True)
+            else:
+                self.image.save(buffer, format=pil_format, quality=min_quality)
             return buffer.getvalue(), min_quality
         except:
             return b'', 0
+
+    def _compress_with_resize(self, target_bytes: int, pil_format: str, quality: int) -> Tuple[bytes, int]:
+        """通过调整尺寸来压缩图片"""
+        scale_factor = 0.9
+
+        while scale_factor >= 0.1:
+            new_width = int(self.image.size[0] * scale_factor)
+            new_height = int(self.image.size[1] * scale_factor)
+            temp_img = self.image.resize((new_width, new_height), Image.Resampling.LANCZOS)
+
+            buffer = io.BytesIO()
+            try:
+                if pil_format == 'JPEG':
+                    temp_img.save(buffer, format=pil_format, quality=quality, optimize=True)
+                else:
+                    temp_img.save(buffer, format=pil_format, quality=quality)
+
+                data = buffer.getvalue()
+                print(f"缩放{scale_factor:.1f}倍，大小={len(data)//1024}KB")
+
+                if len(data) <= target_bytes:
+                    return data, quality
+
+                scale_factor -= 0.1
+            except Exception as e:
+                print(f"调整尺寸压缩失败: {e}")
+                scale_factor -= 0.1
+
+        # 返回最小的结果
+        buffer = io.BytesIO()
+        temp_img = self.image.resize((int(self.image.size[0] * 0.1), int(self.image.size[1] * 0.1)),
+                                     Image.Resampling.LANCZOS)
+        if pil_format == 'JPEG':
+            temp_img.save(buffer, format=pil_format, quality=quality, optimize=True)
+        else:
+            temp_img.save(buffer, format=pil_format, quality=quality)
+        return buffer.getvalue(), quality
 
     def compress_with_quality(self, quality: int, output_format: str = 'JPEG') -> bytes:
         """使用指定质量压缩图片"""
